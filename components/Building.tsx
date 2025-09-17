@@ -59,8 +59,17 @@ const BuildingComponent: React.FC<BuildingProps> = ({ building, gameState, setGa
       );
 
       let warehouseCapacity = prevState.warehouseCapacity;
-      if (building.type === BuildingType.Warehouse && config.capacity) {
-        warehouseCapacity = config.capacity[nextLevel - 1] ?? prevState.warehouseCapacity;
+      if (building.type === BuildingType.Warehouse) {
+        const warehouseConfig = gameConfig.buildings[BuildingType.Warehouse];
+        const recomputedCapacity = villages.reduce((max, villageState) => {
+          const warehouse = villageState.buildings.find(b => b.type === BuildingType.Warehouse);
+          if (!warehouse || !warehouseConfig.capacity) {
+            return max;
+          }
+          const idx = Math.max(0, Math.min(warehouse.level - 1, warehouseConfig.capacity.length - 1));
+          return Math.max(max, warehouseConfig.capacity[idx]);
+        }, warehouseConfig.capacity?.[0] ?? prevState.warehouseCapacity);
+        warehouseCapacity = Math.max(recomputedCapacity, prevState.warehouseCapacity);
       }
 
       return {

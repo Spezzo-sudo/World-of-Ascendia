@@ -1,4 +1,4 @@
-import { GameState, BuildingType, ResourceType, UnitType, BuildingConfig, UnitConfig, Village } from './types';
+import { GameState, BuildingType, ResourceType, UnitType, BuildingConfig, UnitConfig, Village, OpponentState, MapState } from './types';
 
 const createSeries = (start: number, growth: number, levels: number) =>
   Array.from({ length: levels }, (_, index) => Math.round(start * Math.pow(growth, index)));
@@ -14,6 +14,61 @@ const createCostTable = (
 });
 
 const clampSeries = (values: number[], maxLevel: number) => values.slice(0, maxLevel);
+
+type GameConfig = {
+    buildings: {
+        [key in BuildingType]: BuildingConfig;
+    },
+    units: {
+        [key in UnitType]: UnitConfig;
+    }
+}
+
+export const dummyOpponents: Village[] = [
+    {
+        id: 101, name: "Barbarendorf", x: 25, y: 14,
+        buildings: [{ id: 1, type: BuildingType.Wall, level: 2 }],
+        units: [{ type: UnitType.Spearman, count: 50 }]
+    },
+    {
+        id: 102, name: "Verlassene Mine", x: 21, y: 17,
+        buildings: [{ id: 1, type: BuildingType.Wall, level: 1 }],
+        units: [{ type: UnitType.Swordsman, count: 25 }, { type: UnitType.Axeman, count: 10 }]
+    }
+];
+
+const createOpponentState = (
+  id: number,
+  capacity: number,
+  resources: [number, number, number],
+  production: [number, number, number],
+): OpponentState => ({
+  id,
+  capacity,
+  resources: {
+    [ResourceType.Wood]: resources[0],
+    [ResourceType.Clay]: resources[1],
+    [ResourceType.Iron]: resources[2],
+  },
+  productionPerHour: {
+    [ResourceType.Wood]: production[0],
+    [ResourceType.Clay]: production[1],
+    [ResourceType.Iron]: production[2],
+  },
+});
+
+const initialOpponentStates: OpponentState[] = [
+  createOpponentState(101, 1600, [750, 620, 540], [220, 180, 140]),
+  createOpponentState(102, 1400, [520, 710, 680], [160, 190, 210]),
+];
+
+const initialMapState: MapState = {
+  start: { q: 23, r: 15 },
+  waypoints: [],
+  entrenchments: [],
+  scans: [],
+  routeMetrics: { totalCost: 0, etaSeconds: 0, distance: 0 },
+};
 
 export const initialGameState: GameState = {
   playerName: 'Herrscher',
@@ -47,30 +102,10 @@ export const initialGameState: GameState = {
   ],
   armyMovements: [],
   combatReports: [],
+  opponentStates: initialOpponentStates,
+  mapState: initialMapState,
   lastUpdate: Date.now(),
 };
-
-type GameConfig = {
-    buildings: {
-        [key in BuildingType]: BuildingConfig;
-    },
-    units: {
-        [key in UnitType]: UnitConfig;
-    }
-}
-
-export const dummyOpponents: Village[] = [
-    {
-        id: 101, name: "Barbarendorf", x: 25, y: 14,
-        buildings: [{ id: 1, type: BuildingType.Wall, level: 2 }],
-        units: [{ type: UnitType.Spearman, count: 50 }]
-    },
-    {
-        id: 102, name: "Verlassene Mine", x: 21, y: 17,
-        buildings: [{ id: 1, type: BuildingType.Wall, level: 1 }],
-        units: [{ type: UnitType.Swordsman, count: 25 }, { type: UnitType.Axeman, count: 10 }]
-    }
-];
 
 export const gameConfig: GameConfig = {
   buildings: {

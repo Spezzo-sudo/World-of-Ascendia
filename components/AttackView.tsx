@@ -11,7 +11,24 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
   const playerVillage = gameState.villages[0];
   const [selectedTarget, setSelectedTarget] = useState<Village | null>(null);
   const [unitsToSend, setUnitsToSend] = useState<{ [key in UnitType]?: number }>({});
-  
+
+  const { start: mapStart, waypoints: mapWaypoints, routeMetrics } = gameState.mapState;
+
+  const routePoints = useMemo(() => {
+    if (!mapStart) {
+      return mapWaypoints;
+    }
+    return [mapStart, ...mapWaypoints];
+  }, [mapStart, mapWaypoints]);
+
+  const mapRouteTarget = useMemo(() => {
+    if (routePoints.length < 2) {
+      return null;
+    }
+    const end = routePoints[routePoints.length - 1];
+    return dummyOpponents.find(target => target.x === end.q && target.y === end.r) ?? null;
+  }, [routePoints]);
+
   const handleUnitChange = (type: UnitType, value: number) => {
     const availableUnit = playerVillage.units.find(u => u.type === type);
     const maxCount = availableUnit ? availableUnit.count : 0;
@@ -86,6 +103,12 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
     setSelectedTarget(null);
     setUnitsToSend({});
   };
+
+  const handleAdoptRoute = () => {
+    if (mapRouteTarget) {
+      setSelectedTarget(mapRouteTarget);
+    }
+  };
   
   const formatDuration = (ms: number) => new Date(Math.max(ms, 0)).toISOString().substr(11, 8);
 
@@ -97,7 +120,31 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
         {/* Attack Planner */}
         <div className="bg-gray-900 bg-opacity-60 p-4 rounded-lg border border-gray-600">
           <h3 className="text-xl font-semibold mb-3 text-yellow-200">Angriff planen</h3>
-          
+
+          {routePoints.length > 1 && (
+            <div className="mb-4 bg-gray-800/70 border border-gray-600 rounded-lg p-3 text-sm text-gray-300">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-yellow-200">Route aus Karte</span>
+                {mapRouteTarget && (
+                  <button
+                    onClick={handleAdoptRoute}
+                    className="px-2 py-1 rounded-md bg-emerald-600 text-gray-900 font-semibold text-xs hover:bg-emerald-500 transition-colors"
+                  >
+                    Ziel übernehmen
+                  </button>
+                )}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400">
+                <span>Start: {`${routePoints[0].q}|${routePoints[0].r}`}</span>
+                <span>Ziel: {`${routePoints[routePoints.length - 1].q}|${routePoints[routePoints.length - 1].r}`}</span>
+                <span>Distanz: {routeMetrics.distance}</span>
+                <span>ETA: {routeMetrics.etaSeconds === Infinity ? '—' : formatDuration(routeMetrics.etaSeconds * 1000)}</span>
+                <span>Kosten: {Number.isFinite(routeMetrics.totalCost) ? routeMetrics.totalCost.toFixed(1) : '—'}</span>
+                <span>{mapRouteTarget ? `Vorschlag: ${mapRouteTarget.name}` : 'Kein passendes Ziel gefunden'}</span>
+              </div>
+            </div>
+          )}
+
           <div className="mb-4">
             <label className="block text-gray-300 mb-1">Ziel wählen:</label>
             <select

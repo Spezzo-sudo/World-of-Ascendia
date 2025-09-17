@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { GameState } from "../types";
+import { GameState, MapCoordinate, MapScan, MapRouteMetrics } from "../types";
 import { dummyOpponents } from "../constants";
 
 // === Interaktive Karten-UI – Iteration 6 (Fokus auf Navigation & 2D-Klarheit) ===
@@ -77,7 +77,7 @@ type Owner = "ally" | "enemy" | "neutral";
 
 type Hex = { q: number; r: number; terrain: TerrainDefinition; owner: Owner; variant: number };
 
-type Pos = { q: number; r: number };
+type Pos = MapCoordinate;
 
 type Segment = { from: Pos; to: Pos; cost: number; eta: number };
 
@@ -187,6 +187,24 @@ function visibleSet(centers: Pos[], radius: number) {
   return set;
 }
 
+const coordsEqual = (a: Pos | null, b: Pos | null) => {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.q === b.q && a.r === b.r;
+};
+
+const coordArrayEqual = (a: Pos[], b: Pos[]) =>
+  a.length === b.length && a.every((coord, index) => coordsEqual(coord, b[index] ?? null));
+
+const scansEqual = (a: MapScan[], b: MapScan[]) =>
+  a.length === b.length && a.every((scan, index) => {
+    const other = b[index];
+    return !!other && coordsEqual(scan.center, other.center) && scan.expiresAt === other.expiresAt;
+  });
+
+const metricsEqual = (a: MapRouteMetrics, b: MapRouteMetrics) =>
+  a.totalCost === b.totalCost && a.etaSeconds === b.etaSeconds && a.distance === b.distance;
+
 // --- Daten ---
 function useGrid(seed = 777, gameState: GameState) {
     const rnd = useMemo(() => mulberry32(seed), [seed]);
@@ -254,9 +272,12 @@ function formatETA(sec: number) {
 }
 
 // --- Hauptkomponente ---
-interface WorldMapViewProps { gameState: GameState; }
+interface WorldMapViewProps {
+  gameState: GameState;
+  setGameState: React.Dispatch<React.SetStateAction<GameState>>;
+}
 
-const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
+const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState, setGameState }) => {
   const grid = useGrid(2025, gameState);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -269,22 +290,116 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
   type Mode = "selectStart" | "addWaypoint" | "setEnd" | "scan" | "entrench";
   const [mode, setMode] = useState<Mode>("setEnd");
   const playerVillage = gameState.villages[0];
-  const [start, setStart] = useState<Pos | null>(playerVillage ? { q: playerVillage.x, r: playerVillage.y } : null);
-  const [waypoints, setWaypoints] = useState<Pos[]>([]);
+  const { start, waypoints, entrenchments: entrench, scans, routeMetrics } = gameState.mapState;
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [entrench, setEntrench] = useState<Pos[]>([]);
-  const [scans, setScans] = useState<{ center: Pos; until: number }[]>([]);
   const [showOverlay, setShowOverlay] = useState({ fog: true });
   const [pulseTick, setPulseTick] = useState(0);
+  const [viewportHexBounds, setViewportHexBounds] = useState<{ minQ: number; maxQ: number; minR: number; maxR: number } | null>(null);
+  const miniMapRef = useRef<HTMLCanvasElement | null>(null);
   const initialCenterApplied = useRef(false);
+
+  const updateMapState = useCallback((updater: (prev: GameState['mapState']) => GameState['mapState']) => {
+    setGameState(prev => {
+      const nextMapState = updater(prev.mapState);
+      if (
+        coordsEqual(prev.mapState.start, nextMapState.start) &&
+        coordArrayEqual(prev.mapState.waypoints, nextMapState.waypoints) &&
+        coordArrayEqual(prev.mapState.entrenchments, nextMapState.entrenchments) &&
+        scansEqual(prev.mapState.scans, nextMapState.scans) &&
+        metricsEqual(prev.mapState.routeMetrics, nextMapState.routeMetrics)
+      ) {
+        return prev;
+      }
+      return { ...prev, mapState: nextMapState };
+    });
+  }, [setGameState]);
+
+  const setStartPosition = useCallback((pos: Pos | null) => {
+    updateMapState(mapState => {
+      if (coordsEqual(mapState.start, pos)) {
+        return mapState;
+      }
+      return { ...mapState, start: pos };
+    });
+  }, [updateMapState]);
+
+  const updateWaypointsList = useCallback((recipe: (prev: Pos[]) => Pos[]) => {
+    updateMapState(mapState => {
+      const nextWaypoints = recipe(mapState.waypoints);
+      if (coordArrayEqual(mapState.waypoints, nextWaypoints)) {
+        return mapState;
+      }
+      return { ...mapState, waypoints: nextWaypoints };
+    });
+  }, [updateMapState]);
+
+  const toggleEntrench = useCallback((pos: Pos) => {
+    updateMapState(mapState => {
+      const exists = mapState.entrenchments.some(p => p.q === pos.q && p.r === pos.r);
+      const nextEntrenchments = exists
+        ? mapState.entrenchments.filter(p => !(p.q === pos.q && p.r === pos.r))
+        : [...mapState.entrenchments, pos];
+      if (coordArrayEqual(mapState.entrenchments, nextEntrenchments)) {
+        return mapState;
+      }
+      return { ...mapState, entrenchments: nextEntrenchments };
+    });
+  }, [updateMapState]);
+
+  const addScan = useCallback((pos: Pos) => {
+    updateMapState(mapState => ({
+      ...mapState,
+      scans: [...mapState.scans, { center: pos, expiresAt: Date.now() + 10_000 }],
+    }));
+  }, [updateMapState]);
+
+  const removeExpiredScans = useCallback(() => {
+    updateMapState(mapState => {
+      const active = mapState.scans.filter(scan => scan.expiresAt > Date.now());
+      if (scansEqual(mapState.scans, active)) {
+        return mapState;
+      }
+      return { ...mapState, scans: active };
+    });
+  }, [updateMapState]);
+
+  const updateRouteMetrics = useCallback((metrics: MapRouteMetrics) => {
+    updateMapState(mapState => {
+      if (metricsEqual(mapState.routeMetrics, metrics)) {
+        return mapState;
+      }
+      return { ...mapState, routeMetrics: metrics };
+    });
+  }, [updateMapState]);
+
+  const routePoints = useMemo(() => (start ? [start, ...waypoints] : waypoints), [start, waypoints]);
+
+  const handleRemovePoint = useCallback((index: number) => {
+    if (index <= 0) {
+      if (playerVillage) {
+        setStartPosition({ q: playerVillage.x, r: playerVillage.y });
+      }
+      return;
+    }
+    updateWaypointsList(prev => prev.filter((_, wpIndex) => wpIndex !== index - 1));
+  }, [playerVillage, setStartPosition, updateWaypointsList]);
+
+  const clearRoute = useCallback(() => {
+    updateWaypointsList(() => []);
+    if (playerVillage) {
+      setStartPosition({ q: playerVillage.x, r: playerVillage.y });
+    }
+  }, [playerVillage, setStartPosition, updateWaypointsList]);
+
+  const undoWaypoint = useCallback(() => {
+    updateWaypointsList(prev => prev.slice(0, -1));
+  }, [updateWaypointsList]);
 
   useEffect(() => {
     if (!scans.length) return;
-    const timer = window.setInterval(() => {
-      setScans(prev => prev.filter(scan => scan.until > Date.now()));
-    }, 1000);
+    const timer = window.setInterval(removeExpiredScans, 1000);
     return () => window.clearInterval(timer);
-  }, [scans.length]);
+  }, [scans.length, removeExpiredScans]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -305,13 +420,13 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
   // Sichtbarkeit & Route
   const visionCenters = useMemo(() => {
     const own: Pos[] = gameState.villages.map(v => ({q: v.x, r: v.y}));
-    const scanC = scans.filter((s) => s.until > Date.now()).map((s) => s.center);
+    const scanC = scans.filter((s) => s.expiresAt > Date.now()).map((s) => s.center);
     return [...own, ...entrench, ...scanC];
   }, [gameState.villages, entrench, scans]);
   const visible = useMemo(() => visibleSet(visionCenters, SIGHT_RADIUS), [visionCenters]);
   const route = useMemo(() => {
     if (!start) return { path: [] as Pos[], cost: 0, segments: [] as Segment[], etaTotal: 0 };
-    const pts = [start, ...waypoints];
+    const pts = routePoints;
     if (pts.length < 2) return { path: [start], cost: 0, segments: [], etaTotal: 0 };
     let all: Pos[] = [pts[0]]; let costSum = 0; const segs: Segment[] = [];
     for (let i = 0; i < pts.length - 1; i++) {
@@ -328,6 +443,15 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
   const routeDistance = route.path.length > 1 ? route.path.length - 1 : 0;
   const hoveredKey = hoveredHex ? `${hoveredHex.q},${hoveredHex.r}` : null;
   const hoveredVisible = hoveredKey ? visible.has(hoveredKey) : false;
+
+  useEffect(() => {
+    const metrics: MapRouteMetrics = {
+      totalCost: Number.isFinite(route.cost) ? Number(route.cost.toFixed(2)) : Infinity,
+      etaSeconds: Number.isFinite(route.etaTotal) ? Math.round(route.etaTotal) : Infinity,
+      distance: routeDistance,
+    };
+    updateRouteMetrics(metrics);
+  }, [route.cost, route.etaTotal, routeDistance, updateRouteMetrics]);
 
   // Canvas Setup & Zeichnen
   const configureCanvas = useCallback(() => {
@@ -358,11 +482,20 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
     ctx.clearRect(0, 0, w, h);
     const size = HEX_SIZE * zoom;
 
+    let visibleMinQ = Number.POSITIVE_INFINITY;
+    let visibleMaxQ = Number.NEGATIVE_INFINITY;
+    let visibleMinR = Number.POSITIVE_INFINITY;
+    let visibleMaxR = Number.NEGATIVE_INFINITY;
+
     for (let r = 0; r < GRID_H; r++) {
       for (let q = 0; q < GRID_W; q++) {
         const { x, y } = hexToPixel(q, r, size);
         const cx = pan.x + x; const cy = pan.y + y;
         if (cx < -size || cy < -size || cx > w + size || cy > h + size) continue;
+        visibleMinQ = Math.min(visibleMinQ, q);
+        visibleMaxQ = Math.max(visibleMaxQ, q);
+        visibleMinR = Math.min(visibleMinR, r);
+        visibleMaxR = Math.max(visibleMaxR, r);
         const tile = grid[r][q]; const v = getHexVertices(cx, cy, size * 0.95);
         const tracePolygon = () => {
           ctx.beginPath();
@@ -471,6 +604,24 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
       }
     }
 
+    if (visibleMinQ !== Number.POSITIVE_INFINITY) {
+      const bounds = {
+        minQ: visibleMinQ,
+        maxQ: visibleMaxQ,
+        minR: visibleMinR,
+        maxR: visibleMaxR,
+      };
+      setViewportHexBounds(prev => (
+        prev &&
+        prev.minQ === bounds.minQ &&
+        prev.maxQ === bounds.maxQ &&
+        prev.minR === bounds.minR &&
+        prev.maxR === bounds.maxR
+          ? prev
+          : bounds
+      ));
+    }
+
     // Route & Punkte
     if (route.path.length > 1 && route.cost < Infinity) {
         ctx.save();
@@ -519,6 +670,72 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
     }
 
   }, [grid, pan, zoom, showOverlay, entrenchSet, scanCenters, start, waypoints, visible, route, hoveredHex, pulseTick]);
+
+  useEffect(() => {
+    const canvas = miniMapRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const logicalWidth = 180;
+    const logicalHeight = 140;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = logicalWidth * dpr;
+    canvas.height = logicalHeight * dpr;
+    canvas.style.width = `${logicalWidth}px`;
+    canvas.style.height = `${logicalHeight}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ctx.clearRect(0, 0, logicalWidth, logicalHeight);
+    ctx.fillStyle = "rgba(4, 7, 16, 0.92)";
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+
+    const cellW = logicalWidth / GRID_W;
+    const cellH = logicalHeight / GRID_H;
+
+    for (let r = 0; r < GRID_H; r++) {
+      for (let q = 0; q < GRID_W; q++) {
+        const tile = grid[r][q];
+        let fill = "rgba(71, 85, 105, 0.55)";
+        if (tile.owner === "ally") fill = "rgba(56, 189, 248, 0.85)";
+        else if (tile.owner === "enemy") fill = "rgba(248, 113, 113, 0.85)";
+        ctx.fillStyle = fill;
+        ctx.fillRect(q * cellW, r * cellH, cellW + 0.5, cellH + 0.5);
+      }
+    }
+
+    ctx.fillStyle = "rgba(16, 185, 129, 0.55)";
+    entrench.forEach(pos => {
+      ctx.fillRect(pos.q * cellW, pos.r * cellH, cellW, cellH);
+    });
+
+    ctx.fillStyle = "rgba(59, 130, 246, 0.25)";
+    scans.forEach(scan => {
+      ctx.beginPath();
+      ctx.arc((scan.center.q + 0.5) * cellW, (scan.center.r + 0.5) * cellH, Math.max(cellW, cellH), 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    routePoints.forEach((pos, index) => {
+      const isStartPoint = start && pos.q === start.q && pos.r === start.r;
+      const isEndPoint = index === routePoints.length - 1;
+      ctx.fillStyle = isStartPoint ? "#22c55e" : isEndPoint ? "#ef4444" : "#facc15";
+      ctx.beginPath();
+      ctx.arc((pos.q + 0.5) * cellW, (pos.r + 0.5) * cellH, Math.max(2.5, cellW * 0.4), 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    if (viewportHexBounds) {
+      ctx.strokeStyle = "rgba(250, 204, 21, 0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(
+        viewportHexBounds.minQ * cellW,
+        viewportHexBounds.minR * cellH,
+        (viewportHexBounds.maxQ - viewportHexBounds.minQ + 1) * cellW,
+        (viewportHexBounds.maxR - viewportHexBounds.minR + 1) * cellH
+      );
+    }
+  }, [grid, entrench, scans, routePoints, start, viewportHexBounds]);
   
   // --- Interaktion ---
   const handleZoom = useCallback((direction: number, pivot?: {x: number, y: number}) => {
@@ -542,7 +759,8 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
   const handleCenter = useCallback(() => {
     if (!playerVillage) return;
     focusHex(playerVillage.x, playerVillage.y);
-  }, [playerVillage, focusHex]);
+    setStartPosition({ q: playerVillage.x, r: playerVillage.y });
+  }, [playerVillage, focusHex, setStartPosition]);
 
   useEffect(() => {
     if (!playerVillage || initialCenterApplied.current) return;
@@ -574,10 +792,16 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
   }
   const hitPoint = (evX: number, evY: number) => {
     const size = HEX_SIZE * zoom;
-    const pts = [start, ...waypoints].filter(Boolean) as Pos[];
-    for (let i = 0; i < pts.length; i++) {
-      const P = hexToPixel(pts[i].q, pts[i].r, size);
-      if (Math.hypot(evX - (pan.x + P.x), evY - (pan.y + P.y)) < size * 0.3) return i - 1;
+    for (let i = 0; i < routePoints.length; i++) {
+      const point = routePoints[i];
+      const P = hexToPixel(point.q, point.r, size);
+      if (Math.hypot(evX - (pan.x + P.x), evY - (pan.y + P.y)) < size * 0.3) {
+        const isStartPoint = start && point.q === start.q && point.r === start.r;
+        if (isStartPoint) {
+          return -1;
+        }
+        return start ? i - 1 : i;
+      }
     }
     return null;
   }
@@ -601,8 +825,18 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
     } else {
       const t = clientToHex(x, y);
       if (t) {
-        if (dragIndex === -1 && start) setStart(t);
-        else if (dragIndex !== null && dragIndex >= 0) setWaypoints((prev) => { const n = [...prev]; n[dragIndex] = t; return n; });
+        if (dragIndex === -1) {
+          setStartPosition(t);
+        } else if (dragIndex !== null && dragIndex >= 0) {
+          updateWaypointsList(prev => {
+            if (dragIndex >= prev.length) {
+              return prev;
+            }
+            const next = [...prev];
+            next[dragIndex] = t;
+            return next;
+          });
+        }
       }
     }
   };
@@ -615,11 +849,11 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
         if(dragging.current) return;
         const h = hitPoint(x, y); if (h !== null) return;
         const t = clientToHex(x, y); if (!t) return;
-        if (mode === "selectStart") setStart(t);
-        else if (mode === "addWaypoint") setWaypoints((prev) => [...prev, t]);
-        else if (mode === "setEnd") setWaypoints((prev) => (prev.length ? [...prev.slice(0, -1), t] : [t]));
-        else if (mode === "scan") setScans((prev) => [...prev, { center: t, until: Date.now() + 10_000 }]);
-        else if (mode === "entrench") setEntrench((prev) => (prev.find((p) => p.q === t.q && p.r === t.r) ? prev.filter((p) => !(p.q === t.q && p.r === t.r)) : [...prev, t]));
+        if (mode === "selectStart") setStartPosition(t);
+        else if (mode === "addWaypoint") updateWaypointsList((prev) => [...prev, t]);
+        else if (mode === "setEnd") updateWaypointsList((prev) => (prev.length ? [...prev.slice(0, -1), t] : [t]));
+        else if (mode === "scan") addScan(t);
+        else if (mode === "entrench") toggleEntrench(t);
     }, 50);
   };
   const onWheel: React.WheelEventHandler<HTMLCanvasElement> = (e) => {
@@ -692,20 +926,29 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
           onWheel={onWheel}
           onClick={onClick}
         />
-        <div className="absolute top-3 right-3 z-20 p-3 bg-slate-900/85 border border-slate-700/60 rounded-xl shadow-lg backdrop-blur-md text-xs space-y-2 min-w-[140px]">
-          <h4 className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Overlays</h4>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              className="toggle toggle-xs"
-              checked={showOverlay.fog}
-              onChange={(e) => setShowOverlay({ ...showOverlay, fog: e.target.checked })}
+        <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-3">
+          <div className="p-3 bg-slate-900/85 border border-slate-700/60 rounded-xl shadow-lg backdrop-blur-md text-xs space-y-2 min-w-[140px]">
+            <h4 className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Overlays</h4>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="toggle toggle-xs"
+                checked={showOverlay.fog}
+                onChange={(e) => setShowOverlay({ ...showOverlay, fog: e.target.checked })}
+              />
+              Nebel
+            </label>
+            <div className="flex flex-col gap-1 text-[11px] text-slate-300">
+              <span>ETA: <span className="text-emerald-300">{formatETA(route.etaTotal)}</span></span>
+              <span>Distanz: <span className="text-emerald-300">{routeDistance}</span> Felder</span>
+            </div>
+          </div>
+          <div className="p-2 bg-slate-900/85 border border-slate-700/60 rounded-xl shadow-lg backdrop-blur-md text-[10px] uppercase tracking-[0.3em] text-slate-400 flex flex-col items-center gap-2">
+            <canvas
+              ref={miniMapRef}
+              className="w-[180px] h-[140px] rounded-lg border border-slate-700/60 bg-slate-950/80 shadow-inner"
             />
-            Nebel
-          </label>
-          <div className="flex flex-col gap-1 text-[11px] text-slate-300">
-            <span>ETA: <span className="text-emerald-300">{formatETA(route.etaTotal)}</span></span>
-            <span>Distanz: <span className="text-emerald-300">{routeDistance}</span> Felder</span>
+            <span>Mini-Karte</span>
           </div>
         </div>
         <div className="hidden lg:flex flex-col gap-3 absolute top-1/2 left-3 z-20 -translate-y-1/2 bg-slate-900/75 border border-slate-700/60 rounded-xl p-3 text-xs max-w-xs backdrop-blur-md shadow-lg">
@@ -840,55 +1083,123 @@ const WorldMapView: React.FC<WorldMapViewProps> = ({ gameState }) => {
             <li>Verschanzen beschleunigt Abmarsch an diesem Feld</li>
           </ul>
         </div>
-        <div className="absolute bottom-0 inset-x-0 z-30 bg-slate-950/95 border-t border-slate-800/70 p-3">
-          <div className="grid grid-cols-5 gap-2 text-xs">
-            <button
-              className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'selectStart' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
-              onClick={() => setMode('selectStart')}
-            >
-              ▶️ Start
-            </button>
-            <button
-              className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'addWaypoint' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
-              onClick={() => setMode('addWaypoint')}
-            >
-              ➕ Wegpunkt
-            </button>
-            <button
-              className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'setEnd' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
-              onClick={() => setMode('setEnd')}
-            >
-              🏁 Ende
-            </button>
-            <button
-              className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'scan' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
-              onClick={() => setMode('scan')}
-            >
-              📡 Scan
-            </button>
-            <button
-              className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'entrench' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
-              onClick={() => setMode('entrench')}
-            >
-              🛡️ Verschanzen
-            </button>
-          </div>
-          <div className="mt-3 flex gap-2 text-xs">
-            <button
-              className="flex-1 py-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 transition-colors shadow"
-              onClick={() => {
-                setStart(playerVillage ? { q: playerVillage.x, r: playerVillage.y } : null);
-                setWaypoints([]);
-              }}
-            >
-              Reset
-            </button>
-            <button
-              className="flex-1 py-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 transition-colors shadow"
-              onClick={() => setWaypoints((prev) => prev.slice(0, -1))}
-            >
-              Undo
-            </button>
+        <div className="absolute bottom-0 inset-x-0 z-30 bg-slate-950/95 border-t border-slate-800/70">
+          <div className="max-w-6xl mx-auto px-4 py-3 space-y-3">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.4fr)]">
+              <div className="bg-slate-900/70 border border-slate-800/70 rounded-xl p-3 text-xs text-slate-300">
+                <div className="flex items-center justify-between uppercase tracking-[0.3em] text-slate-500 text-[10px]">
+                  <span>Aktive Route</span>
+                  <span>{routePoints.length ? `${routePoints.length} Punkte` : 'Keine Route'}</span>
+                </div>
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="bg-slate-900/60 rounded-lg px-2 py-1">
+                    <span className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Start</span>
+                    <span className="text-sm text-slate-100">{start ? `${start.q}|${start.r}` : '—'}</span>
+                  </div>
+                  <div className="bg-slate-900/60 rounded-lg px-2 py-1">
+                    <span className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Ziel</span>
+                    <span className="text-sm text-slate-100">{routePoints.length > 0 ? `${routePoints[routePoints.length - 1].q}|${routePoints[routePoints.length - 1].r}` : '—'}</span>
+                  </div>
+                  <div className="bg-slate-900/60 rounded-lg px-2 py-1">
+                    <span className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Distanz</span>
+                    <span className="text-sm text-emerald-300">{routeMetrics.distance}</span>
+                  </div>
+                  <div className="bg-slate-900/60 rounded-lg px-2 py-1">
+                    <span className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">ETA</span>
+                    <span className="text-sm text-emerald-300">{routeMetrics.etaSeconds === Infinity ? '—' : formatETA(routeMetrics.etaSeconds)}</span>
+                  </div>
+                </div>
+                <div className="mt-2 bg-slate-900/60 rounded-lg px-2 py-1">
+                  <span className="block text-[10px] uppercase tracking-[0.25em] text-slate-500">Kosten</span>
+                  <span className="text-sm text-amber-300">{Number.isFinite(routeMetrics.totalCost) ? routeMetrics.totalCost.toFixed(1) : '—'}</span>
+                </div>
+              </div>
+              <div className="bg-slate-900/70 border border-slate-800/70 rounded-xl p-3 text-xs text-slate-300">
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <h4 className="uppercase tracking-[0.3em] text-[10px] text-slate-500">Routenpunkte</h4>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={undoWaypoint}
+                      disabled={waypoints.length === 0}
+                      className={`px-2 py-1 rounded-lg border border-slate-700/70 transition-colors ${waypoints.length === 0 ? 'text-slate-600 cursor-not-allowed' : 'hover:bg-slate-800/80'}`}
+                    >
+                      Rückgängig
+                    </button>
+                    <button
+                      onClick={clearRoute}
+                      className="px-2 py-1 rounded-lg border border-slate-700/70 hover:bg-slate-800/80 transition-colors"
+                    >
+                      Zurücksetzen
+                    </button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto pr-1">
+                  {routePoints.length === 0 && (
+                    <span className="text-[11px] text-slate-500">Keine Punkte gesetzt.</span>
+                  )}
+                  {routePoints.map((point, index) => {
+                    const isStartPoint = start && point.q === start.q && point.r === start.r;
+                    const label = isStartPoint ? 'Start' : index === routePoints.length - 1 ? 'Ziel' : `WP ${index}`;
+                    return (
+                      <div
+                        key={`${point.q}-${point.r}-${index}`}
+                        className="flex items-center gap-1 bg-slate-900/80 border border-slate-800/80 rounded-lg px-2 py-1 shadow-inner"
+                        onMouseEnter={() => setHoveredHex(point)}
+                        onMouseLeave={() => setHoveredHex(null)}
+                      >
+                        <button
+                          onClick={() => focusHex(point.q, point.r)}
+                          className="text-xs text-slate-200 hover:text-emerald-300 transition-colors"
+                        >
+                          {label} ({point.q}|{point.r})
+                        </button>
+                        {index > 0 && (
+                          <button
+                            onClick={() => handleRemovePoint(index)}
+                            className="text-slate-500 hover:text-rose-400 transition-colors"
+                            aria-label="Punkt entfernen"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-xs">
+              <button
+                className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'selectStart' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+                onClick={() => setMode('selectStart')}
+              >
+                ▶️ Start
+              </button>
+              <button
+                className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'addWaypoint' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+                onClick={() => setMode('addWaypoint')}
+              >
+                ➕ Wegpunkt
+              </button>
+              <button
+                className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'setEnd' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+                onClick={() => setMode('setEnd')}
+              >
+                🏁 Ende
+              </button>
+              <button
+                className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'scan' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+                onClick={() => setMode('scan')}
+              >
+                📡 Scan
+              </button>
+              <button
+                className={`py-2 rounded-lg flex flex-col items-center gap-1 transition-colors shadow ${mode === 'entrench' ? 'bg-emerald-500/80 text-slate-900 font-semibold' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+                onClick={() => setMode('entrench')}
+              >
+                🛡️ Verschanzen
+              </button>
+            </div>
           </div>
         </div>
       </div>

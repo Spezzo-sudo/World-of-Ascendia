@@ -22,6 +22,13 @@ const App: React.FC = () => {
       units: village.units.map(unit => ({ ...unit })),
     })), []);
 
+  const cloneOpponentStates = useCallback((opponents: GameState['opponentStates']) =>
+    opponents.map(opponent => ({
+      ...opponent,
+      resources: { ...opponent.resources },
+      productionPerHour: { ...opponent.productionPerHour },
+    })), []);
+
   const mergeUnits = useCallback((existing: Unit[], incoming: Unit[]) => {
     const incomingMap = new Map<UnitType, number>();
     incoming.forEach(unit => {
@@ -48,7 +55,7 @@ const App: React.FC = () => {
     return merged;
   }, []);
 
-  type CombatSlices = Pick<GameState, 'villages' | 'armyMovements' | 'combatReports'>;
+  type CombatSlices = Pick<GameState, 'villages' | 'armyMovements' | 'combatReports' | 'opponentStates'>;
 
   const resolveCombat = useCallback((slices: CombatSlices, movement: ArmyMovement): CombatSlices => {
     const attackerIndex = slices.villages.findIndex(village => village.id === movement.originVillage.id);
@@ -57,6 +64,14 @@ const App: React.FC = () => {
     if (attackerIndex === -1 || !defender) {
       return slices;
     }
+
+    const opponentStates = slices.opponentStates.map(opponent => ({
+      ...opponent,
+      resources: { ...opponent.resources },
+      productionPerHour: { ...opponent.productionPerHour },
+    }));
+    const opponentIndex = opponentStates.findIndex(state => state.id === movement.targetVillage.id);
+    const opponent = opponentIndex !== -1 ? opponentStates[opponentIndex] : null;
 
     const attackerPower = movement.units.reduce((sum, unit) => (
       sum + unit.count * gameConfig.units[unit.type].attack
@@ -103,20 +118,28 @@ const App: React.FC = () => {
         sum + unit.count * gameConfig.units[unit.type].carryCapacity
       ), 0);
 
-      const availableResources: Record<ResourceType, number> = {
-        [ResourceType.Wood]: 500,
-        [ResourceType.Clay]: 500,
-        [ResourceType.Iron]: 500,
-      };
+      const availableResources: Record<ResourceType, number> = opponent
+        ? { ...opponent.resources }
+        : {
+            [ResourceType.Wood]: 320,
+            [ResourceType.Clay]: 320,
+            [ResourceType.Iron]: 320,
+          };
 
       let capacityLeft = totalCarryCapacity;
       ([ResourceType.Wood, ResourceType.Clay, ResourceType.Iron] as const).forEach(resourceType => {
         if (capacityLeft <= 0) {
           return;
         }
-        const amountToPlunder = Math.min(capacityLeft, availableResources[resourceType] * 0.5);
-        plunderedResources[resourceType] = Math.floor(amountToPlunder);
-        capacityLeft -= amountToPlunder;
+        const stock = availableResources[resourceType];
+        if (stock <= 0) {
+          return;
+        }
+        const amountToPlunder = Math.min(capacityLeft, stock);
+        const taken = Math.floor(amountToPlunder);
+        plunderedResources[resourceType] = taken;
+        capacityLeft -= taken;
+        availableResources[resourceType] = Math.max(0, stock - taken);
       });
     } else {
       movement.units.forEach(unit => {
@@ -179,10 +202,19 @@ const App: React.FC = () => {
       armyMovements = [...slices.armyMovements, returnMovement];
     }
 
+    if (opponent && attackerWon) {
+      const updatedResources = { ...opponent.resources };
+      ([ResourceType.Wood, ResourceType.Clay, ResourceType.Iron] as const).forEach(resourceType => {
+        updatedResources[resourceType] = Math.max(0, updatedResources[resourceType] - plunderedResources[resourceType]);
+      });
+      opponentStates[opponentIndex] = { ...opponent, resources: updatedResources };
+    }
+
     return {
       villages: slices.villages,
       armyMovements,
       combatReports,
+      opponentStates,
     };
   }, []);
   
@@ -193,6 +225,8 @@ const App: React.FC = () => {
 
       const villages = cloneVillages(prevState.villages);
       const resources = { ...prevState.resources };
+      let warehouseCapacity = gameConfig.buildings[BuildingType.Warehouse].capacity?.[0] ?? prevState.warehouseCapacity;
+      let opponentStates = cloneOpponentStates(prevState.opponentStates);
 
       const production = {
         [ResourceType.Wood]: 0,
@@ -200,28 +234,44 @@ const App: React.FC = () => {
         [ResourceType.Iron]: 0,
       };
 
-      const playerVillage = prevState.villages[0];
-      if (playerVillage) {
-        playerVillage.buildings.forEach(building => {
-          if (building.level > 0) {
-            const buildingConfig = gameConfig.buildings[building.type];
-            if ('production' in buildingConfig && buildingConfig.production && buildingConfig.resourceType) {
-              production[buildingConfig.resourceType] += buildingConfig.production[building.level - 1];
-            }
+      villages.forEach(village => {
+        village.buildings.forEach(building => {
+          if (building.level <= 0) {
+            return;
+          }
+          const buildingConfig = gameConfig.buildings[building.type];
+          if ('production' in buildingConfig && buildingConfig.production && buildingConfig.resourceType) {
+            production[buildingConfig.resourceType] += buildingConfig.production[Math.min(building.level - 1, buildingConfig.production.length - 1)];
+          }
+          if (building.type === BuildingType.Warehouse && buildingConfig.capacity) {
+            const idx = Math.max(0, Math.min(building.level - 1, buildingConfig.capacity.length - 1));
+            warehouseCapacity = Math.max(warehouseCapacity, buildingConfig.capacity[idx]);
           }
         });
-      }
+      });
 
-      const clampResource = (value: number) => Math.min(prevState.warehouseCapacity, value);
+      warehouseCapacity = Math.max(warehouseCapacity, prevState.warehouseCapacity);
+
+      const clampResource = (value: number) => Math.min(warehouseCapacity, value);
       resources[ResourceType.Wood] = clampResource(
-        prevState.resources[ResourceType.Wood] + (production[ResourceType.Wood] / 3600) * elapsedSeconds
+        Math.round(prevState.resources[ResourceType.Wood] + (production[ResourceType.Wood] / 3600) * elapsedSeconds)
       );
       resources[ResourceType.Clay] = clampResource(
-        prevState.resources[ResourceType.Clay] + (production[ResourceType.Clay] / 3600) * elapsedSeconds
+        Math.round(prevState.resources[ResourceType.Clay] + (production[ResourceType.Clay] / 3600) * elapsedSeconds)
       );
       resources[ResourceType.Iron] = clampResource(
-        prevState.resources[ResourceType.Iron] + (production[ResourceType.Iron] / 3600) * elapsedSeconds
+        Math.round(prevState.resources[ResourceType.Iron] + (production[ResourceType.Iron] / 3600) * elapsedSeconds)
       );
+
+      opponentStates = opponentStates.map(opponent => {
+        const updatedResources = { ...opponent.resources };
+        ([ResourceType.Wood, ResourceType.Clay, ResourceType.Iron] as const).forEach(resourceType => {
+          const regenPerSecond = opponent.productionPerHour[resourceType] / 3600;
+          const regenerated = updatedResources[resourceType] + regenPerSecond * elapsedSeconds;
+          updatedResources[resourceType] = Math.min(opponent.capacity, Math.round(regenerated));
+        });
+        return { ...opponent, resources: updatedResources };
+      });
 
       const arrivedMovements = prevState.armyMovements
         .filter(movement => now >= movement.arrivalTime)
@@ -247,9 +297,10 @@ const App: React.FC = () => {
 
       arrivedMovements.forEach(movement => {
         if (movement.type === 'attack') {
-          const result = resolveCombat({ villages, armyMovements, combatReports }, movement);
+          const result = resolveCombat({ villages, armyMovements, combatReports, opponentStates }, movement);
           armyMovements = result.armyMovements;
           combatReports = result.combatReports;
+          opponentStates = result.opponentStates;
         } else if (movement.type === 'return') {
           const villageIndex = villages.findIndex(village => village.id === movement.targetVillage.id);
           if (villageIndex !== -1) {
@@ -280,10 +331,12 @@ const App: React.FC = () => {
         villages,
         armyMovements,
         combatReports,
+        warehouseCapacity,
+        opponentStates,
         lastUpdate: now,
       };
     });
-  }, [cloneVillages, mergeUnits, resolveCombat]);
+  }, [cloneVillages, cloneOpponentStates, mergeUnits, resolveCombat]);
 
   useEffect(() => {
     const gameInterval = setInterval(gameTick, 1000);
@@ -293,7 +346,7 @@ const App: React.FC = () => {
   const renderView = () => {
     switch (activeView) {
       case 'village': return <VillageView gameState={gameState} setGameState={setGameState} />;
-      case 'map': return <WorldMapView gameState={gameState} />;
+      case 'map': return <WorldMapView gameState={gameState} setGameState={setGameState} />;
       case 'army': return <ArmyView />;
       case 'tribe': return <TribeView />;
       case 'attack': return <AttackView gameState={gameState} setGameState={setGameState} />;
@@ -301,17 +354,42 @@ const App: React.FC = () => {
     }
   };
 
+  const navItems: { key: View; label: string; icon: string; description: string }[] = [
+    { key: 'village', label: 'Dorf', icon: '🏡', description: 'Ausbau & Ressourcen' },
+    { key: 'map', label: 'Karte', icon: '🗺️', description: 'Navigation & Sicht' },
+    { key: 'army', label: 'Armee', icon: '⚔️', description: 'Einheitenübersicht' },
+    { key: 'attack', label: 'Angriff', icon: '🎯', description: 'Missionen planen' },
+    { key: 'tribe', label: 'Stamm', icon: '🏰', description: 'Diplomatie & Bonus' },
+  ];
+
   return (
     <div className="min-h-screen bg-cover bg-center bg-fixed" style={{backgroundImage: "url('https://picsum.photos/seed/bg/1920/1080')"}}>
       <div className="min-h-screen bg-black bg-opacity-70 flex flex-col">
         <Header resources={gameState.resources} warehouseCapacity={gameState.warehouseCapacity} />
-        <nav className="bg-black bg-opacity-50 p-2 shadow-lg">
-          <div className="container mx-auto flex justify-center space-x-2 md:space-x-8">
-            <button onClick={() => setActiveView('village')} className={`px-3 py-2 text-base md:text-lg uppercase tracking-wider transition-all duration-300 ${activeView === 'village' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-300 hover:text-yellow-200'}`}>Dorf</button>
-            <button onClick={() => setActiveView('map')} className={`px-3 py-2 text-base md:text-lg uppercase tracking-wider transition-all duration-300 ${activeView === 'map' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-300 hover:text-yellow-200'}`}>Karte</button>
-            <button onClick={() => setActiveView('army')} className={`px-3 py-2 text-base md:text-lg uppercase tracking-wider transition-all duration-300 ${activeView === 'army' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-300 hover:text-yellow-200'}`}>Armee</button>
-            <button onClick={() => setActiveView('attack')} className={`px-3 py-2 text-base md:text-lg uppercase tracking-wider transition-all duration-300 ${activeView === 'attack' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-300 hover:text-yellow-200'}`}>Angriff</button>
-            <button onClick={() => setActiveView('tribe')} className={`px-3 py-2 text-base md:text-lg uppercase tracking-wider transition-all duration-300 ${activeView === 'tribe' ? 'text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-300 hover:text-yellow-200'}`}>Stamm</button>
+        <nav className="bg-black/60 backdrop-blur-md border-b border-black/40">
+          <div className="max-w-5xl mx-auto px-4 py-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+              {navItems.map(item => {
+                const isActive = activeView === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    onClick={() => setActiveView(item.key)}
+                    className={`group flex items-center gap-3 rounded-xl border px-3 py-2 transition-all duration-300 shadow-lg ${
+                      isActive
+                        ? 'bg-emerald-500/85 border-emerald-300 text-slate-900 shadow-emerald-500/30'
+                        : 'bg-slate-900/70 border-slate-700/60 text-slate-200 hover:bg-slate-800/80 hover:border-emerald-400/60'
+                    }`}
+                  >
+                    <span className="text-xl drop-shadow">{item.icon}</span>
+                    <div className="flex flex-col text-left leading-tight">
+                      <span className="text-sm font-semibold tracking-wide">{item.label}</span>
+                      <span className="text-[10px] uppercase tracking-[0.3em] text-slate-400 group-hover:text-emerald-200">{item.description}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </nav>
         <main className="flex-grow container mx-auto p-4">
