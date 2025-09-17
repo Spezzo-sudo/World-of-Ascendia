@@ -1,10 +1,10 @@
 
 import React from 'react';
-import { GameState, Building as BuildingType, ResourceType } from '../types';
+import { GameState, Building as BuildingState, ResourceType, BuildingType } from '../types';
 import { gameConfig } from '../constants';
 
 interface BuildingProps {
-  building: BuildingType;
+  building: BuildingState;
   gameState: GameState;
   setGameState: React.Dispatch<React.SetStateAction<GameState>>;
 }
@@ -14,29 +14,70 @@ const BuildingComponent: React.FC<BuildingProps> = ({ building, gameState, setGa
   const nextLevel = building.level + 1;
   const isMaxLevel = building.level >= config.maxLevel;
 
+  const woodCost = config.cost[ResourceType.Wood][building.level] ?? Infinity;
+  const clayCost = config.cost[ResourceType.Clay][building.level] ?? Infinity;
+  const ironCost = config.cost[ResourceType.Iron][building.level] ?? Infinity;
+
   const canAfford = !isMaxLevel &&
-    gameState.resources.wood >= config.cost[ResourceType.Wood][building.level] &&
-    gameState.resources.clay >= config.cost[ResourceType.Clay][building.level] &&
-    gameState.resources.iron >= config.cost[ResourceType.Iron][building.level];
-    
+    gameState.resources[ResourceType.Wood] >= woodCost &&
+    gameState.resources[ResourceType.Clay] >= clayCost &&
+    gameState.resources[ResourceType.Iron] >= ironCost;
+
   const handleUpgrade = () => {
     if (!canAfford || isMaxLevel) return;
 
     setGameState(prevState => {
-      const newState = { ...prevState };
-      newState.resources.wood -= config.cost[ResourceType.Wood][building.level];
-      newState.resources.clay -= config.cost[ResourceType.Clay][building.level];
-      newState.resources.iron -= config.cost[ResourceType.Iron][building.level];
-
-      const village = newState.villages.find(v => v.id === 1)!;
-      const b = village.buildings.find(b => b.id === building.id)!;
-      b.level += 1;
-      
-      if (building.type === 'warehouse') {
-        newState.warehouseCapacity = gameConfig.buildings.warehouse.capacity[b.level - 1];
+      const villageIndex = prevState.villages.findIndex(village =>
+        village.buildings.some(b => b.id === building.id)
+      );
+      if (villageIndex === -1) {
+        return prevState;
       }
 
-      return newState;
+      const village = prevState.villages[villageIndex];
+      const buildingState = village.buildings.find(b => b.id === building.id);
+      if (!buildingState) {
+        return prevState;
+      }
+
+      const currentLevel = buildingState.level;
+      const nextLevel = currentLevel + 1;
+
+      const resources = {
+        ...prevState.resources,
+        [ResourceType.Wood]: prevState.resources[ResourceType.Wood] - woodCost,
+        [ResourceType.Clay]: prevState.resources[ResourceType.Clay] - clayCost,
+        [ResourceType.Iron]: prevState.resources[ResourceType.Iron] - ironCost,
+      };
+
+      const updatedBuildings = village.buildings.map(b =>
+        b.id === building.id ? { ...b, level: nextLevel } : { ...b }
+      );
+
+      const villages = prevState.villages.map((v, idx) =>
+        idx === villageIndex ? { ...v, buildings: updatedBuildings } : v
+      );
+
+      let warehouseCapacity = prevState.warehouseCapacity;
+      if (building.type === BuildingType.Warehouse) {
+        const warehouseConfig = gameConfig.buildings[BuildingType.Warehouse];
+        const recomputedCapacity = villages.reduce((max, villageState) => {
+          const warehouse = villageState.buildings.find(b => b.type === BuildingType.Warehouse);
+          if (!warehouse || !warehouseConfig.capacity) {
+            return max;
+          }
+          const idx = Math.max(0, Math.min(warehouse.level - 1, warehouseConfig.capacity.length - 1));
+          return Math.max(max, warehouseConfig.capacity[idx]);
+        }, warehouseConfig.capacity?.[0] ?? prevState.warehouseCapacity);
+        warehouseCapacity = Math.max(recomputedCapacity, prevState.warehouseCapacity);
+      }
+
+      return {
+        ...prevState,
+        resources,
+        villages,
+        warehouseCapacity,
+      };
     });
   };
 
@@ -52,9 +93,9 @@ const BuildingComponent: React.FC<BuildingProps> = ({ building, gameState, setGa
         <div className="space-y-2">
           <p className="font-bold text-lg text-center">Ausbau auf Stufe {nextLevel}</p>
           <div className="text-sm space-y-1 bg-gray-800 p-2 rounded">
-            <p className="flex justify-between"><span>Holz:</span> <span className={gameState.resources.wood < config.cost.wood[building.level] ? 'text-red-500' : 'text-green-400'}>{config.cost.wood[building.level]}</span></p>
-            <p className="flex justify-between"><span>Lehm:</span> <span className={gameState.resources.clay < config.cost.clay[building.level] ? 'text-red-500' : 'text-green-400'}>{config.cost.clay[building.level]}</span></p>
-            <p className="flex justify-between"><span>Eisen:</span> <span className={gameState.resources.iron < config.cost.iron[building.level] ? 'text-red-500' : 'text-green-400'}>{config.cost.iron[building.level]}</span></p>
+            <p className="flex justify-between"><span>Holz:</span> <span className={gameState.resources[ResourceType.Wood] < woodCost ? 'text-red-500' : 'text-green-400'}>{woodCost}</span></p>
+            <p className="flex justify-between"><span>Lehm:</span> <span className={gameState.resources[ResourceType.Clay] < clayCost ? 'text-red-500' : 'text-green-400'}>{clayCost}</span></p>
+            <p className="flex justify-between"><span>Eisen:</span> <span className={gameState.resources[ResourceType.Iron] < ironCost ? 'text-red-500' : 'text-green-400'}>{ironCost}</span></p>
             <p className="flex justify-between"><span>Dauer:</span> <span>{new Date(config.buildTime[building.level] * 1000).toISOString().substr(11, 8)}</span></p>
           </div>
           <button

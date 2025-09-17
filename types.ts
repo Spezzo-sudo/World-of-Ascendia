@@ -33,6 +33,30 @@ export interface Unit {
   count: number;
 }
 
+export interface MapCoordinate {
+  q: number;
+  r: number;
+}
+
+export interface MapScan {
+  center: MapCoordinate;
+  expiresAt: number;
+}
+
+export interface MapRouteMetrics {
+  totalCost: number;
+  etaSeconds: number;
+  distance: number;
+}
+
+export interface MapState {
+  start: MapCoordinate | null;
+  waypoints: MapCoordinate[];
+  entrenchments: MapCoordinate[];
+  scans: MapScan[];
+  routeMetrics: MapRouteMetrics;
+}
+
 export interface Village {
   id: number;
   name: string;
@@ -51,6 +75,21 @@ export interface ArmyMovement {
   departureTime: number;
   arrivalTime: number;
   plunderedResources?: { [key in ResourceType]: number };
+}
+
+export interface OpponentState {
+  id: number;
+  resources: {
+    [ResourceType.Wood]: number;
+    [ResourceType.Clay]: number;
+    [ResourceType.Iron]: number;
+  };
+  capacity: number;
+  productionPerHour: {
+    [ResourceType.Wood]: number;
+    [ResourceType.Clay]: number;
+    [ResourceType.Iron]: number;
+  };
 }
 
 export interface CombatReport {
@@ -77,6 +116,8 @@ export interface GameState {
   villages: Village[];
   armyMovements: ArmyMovement[];
   combatReports: CombatReport[];
+  opponentStates: OpponentState[];
+  mapState: MapState;
   lastUpdate: number;
 }
 

@@ -11,11 +11,29 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
   const playerVillage = gameState.villages[0];
   const [selectedTarget, setSelectedTarget] = useState<Village | null>(null);
   const [unitsToSend, setUnitsToSend] = useState<{ [key in UnitType]?: number }>({});
-  
-  const handleUnitChange = (type: UnitType, count: number) => {
+
+  const { start: mapStart, waypoints: mapWaypoints, routeMetrics } = gameState.mapState;
+
+  const routePoints = useMemo(() => {
+    if (!mapStart) {
+      return mapWaypoints;
+    }
+    return [mapStart, ...mapWaypoints];
+  }, [mapStart, mapWaypoints]);
+
+  const mapRouteTarget = useMemo(() => {
+    if (routePoints.length < 2) {
+      return null;
+    }
+    const end = routePoints[routePoints.length - 1];
+    return dummyOpponents.find(target => target.x === end.q && target.y === end.r) ?? null;
+  }, [routePoints]);
+
+  const handleUnitChange = (type: UnitType, value: number) => {
     const availableUnit = playerVillage.units.find(u => u.type === type);
     const maxCount = availableUnit ? availableUnit.count : 0;
-    const newCount = Math.max(0, Math.min(maxCount, count));
+    const sanitized = Number.isNaN(value) ? 0 : value;
+    const newCount = Math.max(0, Math.min(maxCount, sanitized));
     setUnitsToSend(prev => ({ ...prev, [type]: newCount }));
   };
 
@@ -56,28 +74,43 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
     };
 
     setGameState(prev => {
-      const newState = { ...prev };
-      const village = newState.villages.find(v => v.id === playerVillage.id)!;
-      
-      // Subtract units from village
-      unitsForAttack.forEach(sentUnit => {
-        const villageUnit = village.units.find(u => u.type === sentUnit.type)!;
-        villageUnit.count -= sentUnit.count;
-      });
-      village.units = village.units.filter(u => u.count > 0);
+      const villageIndex = prev.villages.findIndex(v => v.id === playerVillage.id);
+      if (villageIndex === -1) {
+        return prev;
+      }
 
-      // Add new army movement
-      newState.armyMovements.push(newMovement);
-      
-      return newState;
+      const village = prev.villages[villageIndex];
+      const unitMap = new Map<UnitType, number>(unitsForAttack.map(u => [u.type, u.count]));
+      const updatedUnits = village.units
+        .map(unit => ({
+          ...unit,
+          count: unit.count - (unitMap.get(unit.type) ?? 0),
+        }))
+        .filter(unit => unit.count > 0);
+
+      const villages = prev.villages.map((v, idx) =>
+        idx === villageIndex ? { ...v, units: updatedUnits } : v
+      );
+
+      return {
+        ...prev,
+        villages,
+        armyMovements: [...prev.armyMovements, newMovement],
+      };
     });
 
     // Reset form
     setSelectedTarget(null);
     setUnitsToSend({});
   };
+
+  const handleAdoptRoute = () => {
+    if (mapRouteTarget) {
+      setSelectedTarget(mapRouteTarget);
+    }
+  };
   
-  const formatDuration = (ms: number) => new Date(ms).toISOString().substr(11, 8);
+  const formatDuration = (ms: number) => new Date(Math.max(ms, 0)).toISOString().substr(11, 8);
 
   return (
     <div className="bg-gray-800 bg-opacity-50 p-6 rounded-lg shadow-2xl border border-gray-700 backdrop-blur-sm">
@@ -87,7 +120,31 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
         {/* Attack Planner */}
         <div className="bg-gray-900 bg-opacity-60 p-4 rounded-lg border border-gray-600">
           <h3 className="text-xl font-semibold mb-3 text-yellow-200">Angriff planen</h3>
-          
+
+          {routePoints.length > 1 && (
+            <div className="mb-4 bg-gray-800/70 border border-gray-600 rounded-lg p-3 text-sm text-gray-300">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-yellow-200">Route aus Karte</span>
+                {mapRouteTarget && (
+                  <button
+                    onClick={handleAdoptRoute}
+                    className="px-2 py-1 rounded-md bg-emerald-600 text-gray-900 font-semibold text-xs hover:bg-emerald-500 transition-colors"
+                  >
+                    Ziel übernehmen
+                  </button>
+                )}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400">
+                <span>Start: {`${routePoints[0].q}|${routePoints[0].r}`}</span>
+                <span>Ziel: {`${routePoints[routePoints.length - 1].q}|${routePoints[routePoints.length - 1].r}`}</span>
+                <span>Distanz: {routeMetrics.distance}</span>
+                <span>ETA: {routeMetrics.etaSeconds === Infinity ? '—' : formatDuration(routeMetrics.etaSeconds * 1000)}</span>
+                <span>Kosten: {Number.isFinite(routeMetrics.totalCost) ? routeMetrics.totalCost.toFixed(1) : '—'}</span>
+                <span>{mapRouteTarget ? `Vorschlag: ${mapRouteTarget.name}` : 'Kein passendes Ziel gefunden'}</span>
+              </div>
+            </div>
+          )}
+
           <div className="mb-4">
             <label className="block text-gray-300 mb-1">Ziel wählen:</label>
             <select
