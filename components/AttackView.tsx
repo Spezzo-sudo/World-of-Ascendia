@@ -12,10 +12,11 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
   const [selectedTarget, setSelectedTarget] = useState<Village | null>(null);
   const [unitsToSend, setUnitsToSend] = useState<{ [key in UnitType]?: number }>({});
   
-  const handleUnitChange = (type: UnitType, count: number) => {
+  const handleUnitChange = (type: UnitType, value: number) => {
     const availableUnit = playerVillage.units.find(u => u.type === type);
     const maxCount = availableUnit ? availableUnit.count : 0;
-    const newCount = Math.max(0, Math.min(maxCount, count));
+    const sanitized = Number.isNaN(value) ? 0 : value;
+    const newCount = Math.max(0, Math.min(maxCount, sanitized));
     setUnitsToSend(prev => ({ ...prev, [type]: newCount }));
   };
 
@@ -56,20 +57,29 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
     };
 
     setGameState(prev => {
-      const newState = { ...prev };
-      const village = newState.villages.find(v => v.id === playerVillage.id)!;
-      
-      // Subtract units from village
-      unitsForAttack.forEach(sentUnit => {
-        const villageUnit = village.units.find(u => u.type === sentUnit.type)!;
-        villageUnit.count -= sentUnit.count;
-      });
-      village.units = village.units.filter(u => u.count > 0);
+      const villageIndex = prev.villages.findIndex(v => v.id === playerVillage.id);
+      if (villageIndex === -1) {
+        return prev;
+      }
 
-      // Add new army movement
-      newState.armyMovements.push(newMovement);
-      
-      return newState;
+      const village = prev.villages[villageIndex];
+      const unitMap = new Map<UnitType, number>(unitsForAttack.map(u => [u.type, u.count]));
+      const updatedUnits = village.units
+        .map(unit => ({
+          ...unit,
+          count: unit.count - (unitMap.get(unit.type) ?? 0),
+        }))
+        .filter(unit => unit.count > 0);
+
+      const villages = prev.villages.map((v, idx) =>
+        idx === villageIndex ? { ...v, units: updatedUnits } : v
+      );
+
+      return {
+        ...prev,
+        villages,
+        armyMovements: [...prev.armyMovements, newMovement],
+      };
     });
 
     // Reset form
@@ -77,7 +87,7 @@ const AttackView: React.FC<AttackViewProps> = ({ gameState, setGameState }) => {
     setUnitsToSend({});
   };
   
-  const formatDuration = (ms: number) => new Date(ms).toISOString().substr(11, 8);
+  const formatDuration = (ms: number) => new Date(Math.max(ms, 0)).toISOString().substr(11, 8);
 
   return (
     <div className="bg-gray-800 bg-opacity-50 p-6 rounded-lg shadow-2xl border border-gray-700 backdrop-blur-sm">

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { GameState, Building, BuildingType, UnitType, ResourceType, ArmyMovement, Unit } from './types';
+import { GameState, BuildingType, UnitType, ResourceType, ArmyMovement, Unit } from './types';
 import { gameConfig, initialGameState, dummyOpponents } from './constants';
 import Header from './components/Header';
 import VillageView from './components/VillageView';
@@ -15,157 +15,275 @@ const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(initialGameState);
   const [activeView, setActiveView] = useState<View>('village');
 
-  const resolveCombat = useCallback((movement: ArmyMovement) => {
-    setGameState(prevState => {
-      const newState = { ...prevState };
-      const attacker = newState.villages.find(v => v.id === movement.originVillage.id);
-      const defender = dummyOpponents.find(v => v.id === movement.targetVillage.id);
+  const cloneVillages = useCallback((villages: GameState['villages']) =>
+    villages.map(village => ({
+      ...village,
+      buildings: village.buildings.map(building => ({ ...building })),
+      units: village.units.map(unit => ({ ...unit })),
+    })), []);
 
-      if (!attacker || !defender) return newState;
-
-      const attackerPower = movement.units.reduce((sum, unit) => {
-        return sum + unit.count * gameConfig.units[unit.type].attack;
-      }, 0) * (Math.random() * 0.2 + 0.9); // +/- 10% randomness
-
-      const wall = defender.buildings.find(b => b.type === BuildingType.Wall);
-      const wallBonus = wall && wall.level > 0 ? gameConfig.buildings.wall.defenseBonus[wall.level - 1] : 0;
-      
-      const defenderPower = defender.units.reduce((sum, unit) => {
-        return sum + unit.count * gameConfig.units[unit.type].defense;
-      }, 0) * (1 + wallBonus);
-      
-      const powerRatio = attackerPower / defenderPower;
-      
-      const attackerLosses: Unit[] = [];
-      const defenderLosses: Unit[] = [];
-      const survivingAttackers: Unit[] = [];
-      let plunderedResources = { [ResourceType.Wood]: 0, [ResourceType.Clay]: 0, [ResourceType.Iron]: 0 };
-      let attackerWon = false;
-
-      if (powerRatio > 1) { // Attacker wins
-        attackerWon = true;
-        defender.units.forEach(u => defenderLosses.push({ ...u }));
-
-        movement.units.forEach(unit => {
-          const lossRate = 1 / powerRatio;
-          const losses = Math.round(unit.count * lossRate);
-          if (losses > 0) attackerLosses.push({ type: unit.type, count: losses });
-          const survivors = unit.count - losses;
-          if (survivors > 0) survivingAttackers.push({ type: unit.type, count: survivors });
-        });
-
-        // Simplified plunder logic
-        const totalCarryCapacity = survivingAttackers.reduce((sum, unit) => {
-            return sum + unit.count * gameConfig.units[unit.type].carryCapacity;
-        }, 0);
-        
-        // Assume defender has 500 of each resource for simulation
-        const availableResources = { wood: 500, clay: 500, iron: 500 }; 
-        let capacityLeft = totalCarryCapacity;
-
-        Object.keys(availableResources).forEach((res) => {
-            const resourceType = res as ResourceType;
-            const amountToPlunder = Math.min(capacityLeft, availableResources[resourceType] * 0.5); // Can plunder up to 50%
-            plunderedResources[resourceType] = Math.floor(amountToPlunder);
-            capacityLeft -= amountToPlunder;
-        });
-
-      } else { // Defender wins
-        movement.units.forEach(u => attackerLosses.push({ ...u }));
-        
-        defender.units.forEach(unit => {
-          const lossRate = powerRatio;
-          const losses = Math.round(unit.count * lossRate);
-          if (losses > 0) defenderLosses.push({ type: unit.type, count: losses });
-        });
-      }
-
-      // Create combat report
-      const reportId = `report-${Date.now()}`;
-      newState.combatReports.unshift({
-          id: reportId,
-          attacker: attacker.name,
-          defender: defender.name,
-          attackerUnits: movement.units,
-          defenderUnits: [...defender.units],
-          attackerLosses,
-          defenderLosses,
-          plunderedResources,
-          timestamp: Date.now(),
-          attackerWon,
-      });
-      if (newState.combatReports.length > 20) newState.combatReports.pop();
-
-      // Create return trip if there are survivors
-      if (survivingAttackers.length > 0) {
-        const travelTime = movement.arrivalTime - movement.departureTime;
-        const returnMovement: ArmyMovement = {
-            id: `return-${movement.id}`,
-            type: 'return',
-            units: survivingAttackers,
-            originVillage: movement.originVillage,
-            targetVillage: movement.targetVillage,
-            departureTime: movement.arrivalTime,
-            arrivalTime: movement.arrivalTime + travelTime,
-            plunderedResources,
-        };
-        newState.armyMovements.push(returnMovement);
-      }
-      
-      return newState;
+  const mergeUnits = useCallback((existing: Unit[], incoming: Unit[]) => {
+    const incomingMap = new Map<UnitType, number>();
+    incoming.forEach(unit => {
+      incomingMap.set(unit.type, (incomingMap.get(unit.type) ?? 0) + unit.count);
     });
+
+    const merged: Unit[] = existing.map(unit => ({
+      ...unit,
+      count: unit.count + (incomingMap.get(unit.type) ?? 0),
+    })).filter(unit => unit.count > 0);
+
+    merged.forEach(unit => {
+      if (incomingMap.has(unit.type)) {
+        incomingMap.delete(unit.type);
+      }
+    });
+
+    incomingMap.forEach((count, type) => {
+      if (count > 0) {
+        merged.push({ type, count });
+      }
+    });
+
+    return merged;
+  }, []);
+
+  type CombatSlices = Pick<GameState, 'villages' | 'armyMovements' | 'combatReports'>;
+
+  const resolveCombat = useCallback((slices: CombatSlices, movement: ArmyMovement): CombatSlices => {
+    const attackerIndex = slices.villages.findIndex(village => village.id === movement.originVillage.id);
+    const defender = dummyOpponents.find(village => village.id === movement.targetVillage.id);
+
+    if (attackerIndex === -1 || !defender) {
+      return slices;
+    }
+
+    const attackerPower = movement.units.reduce((sum, unit) => (
+      sum + unit.count * gameConfig.units[unit.type].attack
+    ), 0) * (Math.random() * 0.2 + 0.9);
+
+    const wall = defender.buildings.find(building => building.type === BuildingType.Wall);
+    const wallBonus = wall && wall.level > 0
+      ? gameConfig.buildings.wall.defenseBonus[wall.level - 1]
+      : 0;
+
+    const defenderPower = defender.units.reduce((sum, unit) => (
+      sum + unit.count * gameConfig.units[unit.type].defense
+    ), 0) * (1 + wallBonus);
+
+    const powerRatio = attackerPower / defenderPower;
+
+    const attackerLosses: Unit[] = [];
+    const defenderLosses: Unit[] = [];
+    const survivingAttackers: Unit[] = [];
+    const plunderedResources: Record<ResourceType, number> = {
+      [ResourceType.Wood]: 0,
+      [ResourceType.Clay]: 0,
+      [ResourceType.Iron]: 0,
+    };
+    let attackerWon = false;
+
+    if (powerRatio > 1) {
+      attackerWon = true;
+      defender.units.forEach(unit => defenderLosses.push({ ...unit }));
+
+      movement.units.forEach(unit => {
+        const lossRate = 1 / powerRatio;
+        const losses = Math.round(unit.count * lossRate);
+        if (losses > 0) {
+          attackerLosses.push({ type: unit.type, count: losses });
+        }
+        const survivors = unit.count - losses;
+        if (survivors > 0) {
+          survivingAttackers.push({ type: unit.type, count: survivors });
+        }
+      });
+
+      const totalCarryCapacity = survivingAttackers.reduce((sum, unit) => (
+        sum + unit.count * gameConfig.units[unit.type].carryCapacity
+      ), 0);
+
+      const availableResources: Record<ResourceType, number> = {
+        [ResourceType.Wood]: 500,
+        [ResourceType.Clay]: 500,
+        [ResourceType.Iron]: 500,
+      };
+
+      let capacityLeft = totalCarryCapacity;
+      ([ResourceType.Wood, ResourceType.Clay, ResourceType.Iron] as const).forEach(resourceType => {
+        if (capacityLeft <= 0) {
+          return;
+        }
+        const amountToPlunder = Math.min(capacityLeft, availableResources[resourceType] * 0.5);
+        plunderedResources[resourceType] = Math.floor(amountToPlunder);
+        capacityLeft -= amountToPlunder;
+      });
+    } else {
+      movement.units.forEach(unit => {
+        attackerLosses.push({ ...unit });
+      });
+
+      defender.units.forEach(unit => {
+        const lossRate = powerRatio;
+        const losses = Math.round(unit.count * lossRate);
+        if (losses > 0) {
+          defenderLosses.push({ type: unit.type, count: losses });
+        }
+      });
+    }
+
+    const attackerVillage = slices.villages[attackerIndex];
+
+    const combatReports = [
+      {
+        id: `report-${Date.now()}`,
+        attacker: attackerVillage.name,
+        defender: defender.name,
+        attackerUnits: movement.units.map(unit => ({ ...unit })),
+        defenderUnits: defender.units.map(unit => ({ ...unit })),
+        attackerLosses,
+        defenderLosses,
+        plunderedResources,
+        timestamp: Date.now(),
+        attackerWon,
+      },
+      ...slices.combatReports,
+    ];
+
+    if (combatReports.length > 20) {
+      combatReports.length = 20;
+    }
+
+    let armyMovements = slices.armyMovements;
+    if (survivingAttackers.length > 0) {
+      const travelTime = movement.arrivalTime - movement.departureTime;
+      const returnMovement: ArmyMovement = {
+        id: `return-${movement.id}`,
+        type: 'return',
+        units: survivingAttackers.map(unit => ({ ...unit })),
+        originVillage: {
+          id: movement.targetVillage.id,
+          x: movement.targetVillage.x,
+          y: movement.targetVillage.y,
+        },
+        targetVillage: {
+          id: attackerVillage.id,
+          name: attackerVillage.name,
+          x: attackerVillage.x,
+          y: attackerVillage.y,
+        },
+        departureTime: movement.arrivalTime,
+        arrivalTime: movement.arrivalTime + travelTime,
+        plunderedResources: { ...plunderedResources },
+      };
+      armyMovements = [...slices.armyMovements, returnMovement];
+    }
+
+    return {
+      villages: slices.villages,
+      armyMovements,
+      combatReports,
+    };
   }, []);
   
   const gameTick = useCallback(() => {
     setGameState(prevState => {
       const now = Date.now();
-      const elapsedSeconds = (now - prevState.lastUpdate) / 1000;
-      const newState = { ...prevState };
+      const elapsedSeconds = Math.max(0, (now - prevState.lastUpdate) / 1000);
 
-      // 1. Resource Production
-      const production = { [ResourceType.Wood]: 0, [ResourceType.Clay]: 0, [ResourceType.Iron]: 0 };
-      prevState.villages[0].buildings.forEach(building => {
-        if (building.level > 0) {
+      const villages = cloneVillages(prevState.villages);
+      const resources = { ...prevState.resources };
+
+      const production = {
+        [ResourceType.Wood]: 0,
+        [ResourceType.Clay]: 0,
+        [ResourceType.Iron]: 0,
+      };
+
+      const playerVillage = prevState.villages[0];
+      if (playerVillage) {
+        playerVillage.buildings.forEach(building => {
+          if (building.level > 0) {
             const buildingConfig = gameConfig.buildings[building.type];
-            if('production' in buildingConfig) {
-                 production[buildingConfig.resourceType] += buildingConfig.production[building.level - 1];
-            }
-        }
-      });
-      newState.resources[ResourceType.Wood] = Math.min(prevState.warehouseCapacity, prevState.resources[ResourceType.Wood] + (production[ResourceType.Wood] / 3600) * elapsedSeconds);
-      newState.resources[ResourceType.Clay] = Math.min(prevState.warehouseCapacity, prevState.resources[ResourceType.Clay] + (production[ResourceType.Clay] / 3600) * elapsedSeconds);
-      newState.resources[ResourceType.Iron] = Math.min(prevState.warehouseCapacity, prevState.resources[ResourceType.Iron] + (production[ResourceType.Iron] / 3600) * elapsedSeconds);
-
-      // 2. Army Movement & Combat Resolution
-      const arrivedMovements = newState.armyMovements.filter(m => now >= m.arrivalTime);
-      if (arrivedMovements.length > 0) {
-        newState.armyMovements = newState.armyMovements.filter(m => now < m.arrivalTime);
-
-        arrivedMovements.forEach(movement => {
-          if (movement.type === 'attack') {
-            resolveCombat(movement); // This will update state again, causing a re-render. We need to handle this carefully.
-          } else if (movement.type === 'return') {
-            const village = newState.villages.find(v => v.id === movement.originVillage.id);
-            if(village) {
-              movement.units.forEach(retUnit => {
-                const existingUnit = village.units.find(vUnit => vUnit.type === retUnit.type);
-                if (existingUnit) existingUnit.count += retUnit.count;
-                else village.units.push(retUnit);
-              });
-              if(movement.plunderedResources) {
-                newState.resources.wood = Math.min(newState.warehouseCapacity, newState.resources.wood + movement.plunderedResources.wood);
-                newState.resources.clay = Math.min(newState.warehouseCapacity, newState.resources.clay + movement.plunderedResources.clay);
-                newState.resources.iron = Math.min(newState.warehouseCapacity, newState.resources.iron + movement.plunderedResources.iron);
-              }
+            if ('production' in buildingConfig && buildingConfig.production && buildingConfig.resourceType) {
+              production[buildingConfig.resourceType] += buildingConfig.production[building.level - 1];
             }
           }
         });
       }
 
-      newState.lastUpdate = now;
-      return newState;
+      const clampResource = (value: number) => Math.min(prevState.warehouseCapacity, value);
+      resources[ResourceType.Wood] = clampResource(
+        prevState.resources[ResourceType.Wood] + (production[ResourceType.Wood] / 3600) * elapsedSeconds
+      );
+      resources[ResourceType.Clay] = clampResource(
+        prevState.resources[ResourceType.Clay] + (production[ResourceType.Clay] / 3600) * elapsedSeconds
+      );
+      resources[ResourceType.Iron] = clampResource(
+        prevState.resources[ResourceType.Iron] + (production[ResourceType.Iron] / 3600) * elapsedSeconds
+      );
+
+      const arrivedMovements = prevState.armyMovements
+        .filter(movement => now >= movement.arrivalTime)
+        .map(movement => ({
+          ...movement,
+          units: movement.units.map(unit => ({ ...unit })),
+          plunderedResources: movement.plunderedResources
+            ? { ...movement.plunderedResources }
+            : undefined,
+        }));
+
+      let armyMovements = prevState.armyMovements
+        .filter(movement => now < movement.arrivalTime)
+        .map(movement => ({
+          ...movement,
+          units: movement.units.map(unit => ({ ...unit })),
+          plunderedResources: movement.plunderedResources
+            ? { ...movement.plunderedResources }
+            : undefined,
+        }));
+
+      let combatReports = prevState.combatReports.slice();
+
+      arrivedMovements.forEach(movement => {
+        if (movement.type === 'attack') {
+          const result = resolveCombat({ villages, armyMovements, combatReports }, movement);
+          armyMovements = result.armyMovements;
+          combatReports = result.combatReports;
+        } else if (movement.type === 'return') {
+          const villageIndex = villages.findIndex(village => village.id === movement.targetVillage.id);
+          if (villageIndex !== -1) {
+            const updatedVillage = {
+              ...villages[villageIndex],
+              units: mergeUnits(villages[villageIndex].units, movement.units),
+            };
+            villages[villageIndex] = updatedVillage;
+
+            if (movement.plunderedResources) {
+              resources[ResourceType.Wood] = clampResource(
+                resources[ResourceType.Wood] + movement.plunderedResources[ResourceType.Wood]
+              );
+              resources[ResourceType.Clay] = clampResource(
+                resources[ResourceType.Clay] + movement.plunderedResources[ResourceType.Clay]
+              );
+              resources[ResourceType.Iron] = clampResource(
+                resources[ResourceType.Iron] + movement.plunderedResources[ResourceType.Iron]
+              );
+            }
+          }
+        }
+      });
+
+      return {
+        ...prevState,
+        resources,
+        villages,
+        armyMovements,
+        combatReports,
+        lastUpdate: now,
+      };
     });
-  }, [resolveCombat]);
+  }, [cloneVillages, mergeUnits, resolveCombat]);
 
   useEffect(() => {
     const gameInterval = setInterval(gameTick, 1000);
